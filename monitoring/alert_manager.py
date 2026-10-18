@@ -24,13 +24,16 @@ def create_alert(
         print("Alert created successfully")
         return True
     except Exception as e:
+        connection.rollback()
         print(f"Error creating alert: {e}")
         return False
+    finally:
+        connection.close()
     
 # connect alert to integrity score
 
 def create_risk_alert(candidate_id, session_id, risk_level, integrity_score):
-    connection = get_db()
+    risk_level = risk_level.strip().lower()
     
     if risk_level == "low":
         print("Risk level is low, no alert created.")

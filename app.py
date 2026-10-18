@@ -19,7 +19,7 @@ from monitoring.alert_manager import create_alert, create_risk_alert
 from monitoring.ai_report_manager import save_ai_report, get_ai_report
 
 import base64
-from monitoring.evidence_manager import save_evidence
+from monitoring.evidence_manager import save_evidence, verify_evidence as verify_evidence_record
 from monitoring.reviewer_manager import get_session_summary
 
 
@@ -648,7 +648,7 @@ def verify_evidence(evidence_id):
     if "candidate_id" not in session:
         return {"success": False, "message": "Candidate not logged in"}, 401
 
-    results = verify_evidence(evidence_id)
+    results = verify_evidence_record(evidence_id)
     if results["message"]=="Evidence is invalid":
         return {"success": False, "message": "Evidence is invalid"}, 400
     return {"success": True, "message": "Evidence is valid", "evidence_id": results["evidence_id"], "stored_hash": results["stored_hash"], "calculated_hash": results["calculated_hash"]}, 200

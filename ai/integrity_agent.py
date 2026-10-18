@@ -218,7 +218,7 @@ def generate_real_integrity_report(candidate_id,session_id):
     validation = validate_ai_report(report, report_context)
     if not validation["valid"]:
         raise ValueError(
-            f"ai report validation failed {validation["reason"]}"
+            f"ai report validation failed {validation['reason']}"
         )
         
     return report

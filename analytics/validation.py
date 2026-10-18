@@ -8,8 +8,9 @@ def validate_low_risk_level_session():
     
     face_presence_ratio=98
     
-    penalty = calculate_event_penalty(browser_events, face_presence_ratio)
-    risk = get_risk_level(penalty)
+    penalty = calculate_event_penalty(browser_events)
+    score = calculate_integrity_score(browser_events, face_presence_ratio)
+    risk = get_risk_level(score)
     
     print(f"Penalty: {penalty}, Risk Level: {risk}")
     print("Expected Risk Level: low")
@@ -30,8 +31,9 @@ def validate_medium_risk_level_session():
     
     face_presence_ratio=98
     
-    penalty = calculate_event_penalty(browser_events, face_presence_ratio)
-    risk = get_risk_level(penalty)
+    penalty = calculate_event_penalty(browser_events)
+    score = calculate_integrity_score(browser_events, face_presence_ratio)
+    risk = get_risk_level(score)
     
     print(f"Penalty: {penalty}, Risk Level: {risk}")
     print("Expected Risk Level: medium")
@@ -56,8 +58,9 @@ def validate_high_risk_level_session():
     
     face_presence_ratio=98
     
-    penalty = calculate_event_penalty(browser_events, face_presence_ratio)
-    risk = get_risk_level(penalty)
+    penalty = calculate_event_penalty(browser_events)
+    score = calculate_integrity_score(browser_events, face_presence_ratio)
+    risk = get_risk_level(score)
     
     print(f"Penalty: {penalty}, Risk Level: {risk}")
     print("Expected Risk Level: high")

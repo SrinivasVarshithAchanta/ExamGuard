@@ -2,7 +2,7 @@
 ExamGuard - Invigilator Dashboard (Streamlit)
 
 Run (Flask app can run at the same time, they share the SQLite file):
-    streamlit run dashboard.py
+    streamlit run dashboard/streamlit_app.py
 """
 
 import hmac
