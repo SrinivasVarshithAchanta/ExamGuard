@@ -1,3 +1,5 @@
+.env
 __pycache__/
-*.py[cod]
-
+*.pyc
+database/*.db
+static/uploads/

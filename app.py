@@ -10,6 +10,17 @@ from camera import save_captured_photo
 from monitoring.face_monitor import detect_face
 from monitoring.face_logger import log_face_state
 from monitoring import event_detector
+from monitoring.integrity_score import compute_integrity_score
+from monitoring.face_monitor import close_open_face_event
+
+from ai.integrity_agent import generate_real_integrity_report
+from monitoring.incident_logger import create_incident
+from monitoring.alert_manager import create_alert, create_risk_alert
+from monitoring.ai_report_manager import save_ai_report, get_ai_report
+
+import base64
+from monitoring.evidence_manager import save_evidence
+from monitoring.reviewer_manager import get_session_summary
 
 
 app = Flask(__name__)
@@ -201,32 +212,29 @@ def logout():
 # ------------------------------------------------
 # START EXAM
 # ------------------------------------------------
-@app.route("/start-exam")
+@app.route("/start-exam", methods=["POST"])
 def start_exam():
-
     if "candidate_id" not in session:
         return redirect(url_for("login"))
-
-    exam_session_id = str(uuid.uuid4())
-    session["exam_session_id"] = exam_session_id
-
+    candidate_id = session["candidate_id"]
     connection = get_db()
-
     try:
-        connection.execute("""
-            INSERT INTO exam_sessions
-                (candidate_id, session_id, status, started_at)
-            VALUES (?, ?, 'in_progress', ?)
-        """, (
-            session["candidate_id"],
-            exam_session_id,
-            datetime.now().isoformat(),
-        ))
-        connection.commit()
-
+        row = connection.execute("""
+            SELECT session_id FROM exam_sessions
+            WHERE candidate_id = ? AND status IN ('in_progress','paused')
+            ORDER BY started_at DESC LIMIT 1""", (candidate_id,)).fetchone()
+        if row:
+            exam_session_id = row["session_id"]
+        else:
+            exam_session_id = str(uuid.uuid4())
+            connection.execute("""
+                INSERT INTO exam_sessions (candidate_id, session_id, status, started_at)
+                VALUES (?, ?, 'in_progress', ?)""",
+                (candidate_id, exam_session_id, datetime.now().isoformat()))
+            connection.commit()
+        session["exam_session_id"] = exam_session_id
     finally:
         connection.close()
-
     return render_template("exam.html", candidate_name=session.get("candidate_name"))
 
 
@@ -280,28 +288,145 @@ def resume_exam():
 @app.route("/submit-exam", methods=["POST"])
 def submit_exam():
 
-    if "candidate_id" not in session or "exam_session_id" not in session:
-        return {"success": False, "message": "No active exam session"}, 400
+    # --------------------------------------------------
+    # 1. Check candidate login and active exam session
+    # --------------------------------------------------
+
+    if (
+        "candidate_id" not in session
+        or "exam_session_id" not in session
+    ):
+        return {
+            "success": False,
+            "message": "No active exam session"
+        }, 400
+
+
+    candidate_id = session["candidate_id"]
+
+    exam_session_id = session["exam_session_id"]
+
+
+    # --------------------------------------------------
+    # 2. Record exam submission time
+    # --------------------------------------------------
+
+    submitted_at = datetime.now().isoformat()
+
 
     connection = get_db()
 
     try:
+
         connection.execute("""
             UPDATE exam_sessions
-            SET status = 'submitted', submitted_at = ?
+            SET
+                status = 'submitted',
+                submitted_at = ?
             WHERE session_id = ?
-        """, (datetime.now().isoformat(), session["exam_session_id"]))
+            AND candidate_id = ?
+        """, (
+            submitted_at,
+            exam_session_id,
+            candidate_id
+        ))
+
         connection.commit()
 
+    except Exception as e:
+
+        connection.rollback()
+
+        return {
+            "success": False,
+            "message": str(e)
+        }, 500
+
     finally:
+
         connection.close()
 
-    session.pop("exam_session_id", None)
+
+    # --------------------------------------------------
+    # 3. Close the final open face event
+    # --------------------------------------------------
+
+    close_open_face_event(
+        candidate_id,
+        exam_session_id
+    )
+      
+    # --------------------------------------------------
+    # 4. Calculate final integrity score
+    # --------------------------------------------------
+
+    result = compute_integrity_score(
+        candidate_id,
+        exam_session_id
+    )
+    
+    # connection alert to integrity score
+    
+    create_risk_alert(
+        candidate_id=candidate_id,
+        session_id=exam_session_id,
+        risk_level=result["risk_level"],
+        integrity_score=result["integrity_score"]
+    )
+    
+    
+    
+    # --------------------------------------------------
+    # 5. Generate integrity report using AI agent
+    # --------------------------------------------------
+    report = generate_real_integrity_report(
+        candidate_id,
+        exam_session_id
+    )
+    
+    save_report_result = save_ai_report(
+        candidate_id=candidate_id,
+        session_id=exam_session_id,
+        report=report
+    )
+    
+    print("AI-Generated Integrity Report:")
+    print(report)
+    print("Report saved in database with ID:", save_report_result.get("id"))
+
+
+    # --------------------------------------------------
+    # 5. Remove active exam session
+    # --------------------------------------------------
+
+    session.pop(
+        "exam_session_id",
+        None
+    )
+
+
+    # --------------------------------------------------
+    # 6. Return final result
+    # --------------------------------------------------
 
     return {
         "success": True,
-        "message": "Exam submitted",
-        "redirect": url_for("dashboard"),
+        "message": "Exam submitted successfully",
+
+        "integrity_score":
+            result["integrity_score"],
+
+        "face_presence_ratio":
+            result["face_presence_ratio"],
+
+        "event_penalty":
+            result["event_penalty"],
+
+        "risk_level":
+            result["risk_level"],
+
+        "redirect":
+            url_for("dashboard")
     }
 
 
@@ -377,11 +502,38 @@ def log_browser_event():
         ))
 
         connection.commit()
+        
+        print("================================")
+        print("BROWSER EVENT RECEIVED")
+        print("candidate_id:", candidate_id)
+        print("session_id:", exam_session_id)
+        print("event_type:", event_type)
+        print("details:", details)
+        print("================================")
+        
+        screenshot_required = False
 
         # Run the rule-based suspicious event detection engine
-        event_detector.evaluate_browser_event(
+        rule_results = event_detector.evaluate_browser_event(
             connection, candidate_id, exam_session_id, event_type
         )
+        
+        print("rule_results:", rule_results)
+        
+        if rule_results:
+            create_incident(candidate_id = candidate_id,
+                            session_id= exam_session_id,
+                            event_type=rule_results["event_type"],
+                            description=rule_results["reason"],
+                            severity=rule_results["severity"]
+                            )
+            create_alert(candidate_id = candidate_id,
+                         session_id= exam_session_id,
+                         alert_type=rule_results["event_type"],
+                         message=rule_results["reason"],
+                         severity=rule_results["severity"]
+            )
+            screenshot_required = True
 
     except Exception as e:
         connection.rollback()
@@ -390,8 +542,164 @@ def log_browser_event():
     finally:
         connection.close()
 
-    return {"success": True, "message": "Browser event saved"}
+    return {"success": True, "message": "Browser event saved", "screenshot_required": screenshot_required}
 
+
+@app.route("/upload-evidence", methods=["POST"])
+def upload_evidence():
+
+    # --------------------------------------------------
+    # Check active candidate/session
+    # --------------------------------------------------
+
+    if (
+        "candidate_id" not in session
+        or "exam_session_id" not in session
+    ):
+
+        return {
+            "success": False,
+            "message": "No active exam session"
+        }, 400
+
+    # --------------------------------------------------
+    # Read JSON
+    # --------------------------------------------------
+
+    data = request.get_json(
+        silent=True
+    )
+
+    if not data:
+
+        return {
+            "success": False,
+            "message": "No evidence data received"
+        }, 400
+
+    image_data = data.get(
+        "image"
+    )
+
+    if not image_data:
+
+        return {
+            "success": False,
+            "message": "Screenshot is required"
+        }, 400
+
+    try:
+
+        # --------------------------------------------------
+
+        if "," in image_data:
+
+            image_data = image_data.split(
+                ",",
+                1
+            )[1]
+
+        # --------------------------------------------------
+        # Base64 → binary bytes
+        # --------------------------------------------------
+
+        file_data = base64.b64decode(
+            image_data
+        )
+
+        if not file_data:
+
+            return {
+                "success": False,
+                "message": "Screenshot data is empty"
+            }, 400
+
+        # --------------------------------------------------
+        # Save evidence
+        #
+        # save_evidence() calculates SHA-256 internally
+        # --------------------------------------------------
+
+        result = save_evidence(
+            candidate_id=session["candidate_id"],
+            session_id=session["exam_session_id"],
+            evidence_type="screenshot",
+            filename="suspicious_event.jpg",
+            mime_type="image/jpeg",
+            file_data=file_data
+        )
+
+        return {
+            "success": True,
+            "message": "Screenshot evidence saved",
+            "sha256_hash": result["sha256_hash"]
+        }
+
+    except Exception as e:
+
+        return {
+            "success": False,
+            "message": str(e)
+        }, 500
+
+@app.route("/verify-evidence/<int:evidence_id>", methods=["GET"])
+def verify_evidence(evidence_id):
+    
+    if "candidate_id" not in session:
+        return {"success": False, "message": "Candidate not logged in"}, 401
+
+    results = verify_evidence(evidence_id)
+    if results["message"]=="Evidence is invalid":
+        return {"success": False, "message": "Evidence is invalid"}, 400
+    return {"success": True, "message": "Evidence is valid", "evidence_id": results["evidence_id"], "stored_hash": results["stored_hash"], "calculated_hash": results["calculated_hash"]}, 200
+
+@app.route("/ai-report/<int:candidate_id>/<session_id>", methods=["GET"])
+def ai_report(candidate_id, session_id):
+
+    result = get_ai_report(
+        candidate_id,
+        session_id
+    )
+
+    if result is None:
+        return {
+            "success": False,
+            "message": "AI report not found"
+        }, 404
+
+    return {
+        "success": True,
+        "report": result
+    }
+    
+
+@app.route("/reviewer/session/<int:candidate_id>/<session_id>")
+def reviewer_session(candidate_id, session_id):
+
+    # Require reviewer authentication.
+    # This assumes your reviewer login stores
+    # session["reviewer_id"].
+    if "reviewer_id" not in session:
+        return {
+            "success": False,
+            "message": "Reviewer login required"
+        }, 401
+
+    summary = get_session_summary(
+        candidate_id,
+        session_id
+    )
+
+    if summary is None:
+        return {
+            "success": False,
+            "message": "Session summary not found"
+        }, 404
+
+    return render_template(
+        "reviewer_session.html",
+        summary=summary
+    )
 
 # ------------------------------------------------
 # RUN FLASK
